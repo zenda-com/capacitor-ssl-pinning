@@ -1,6 +1,6 @@
 {
   "name": "@capgo/capacitor-ssl-pinning",
-  "version": "8.1.2",
+  "version": "8.1.2-dev",
   "description": "Capacitor SSL pinning plugin for Android and iOS that integrates with CapacitorHttp.",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
@@ -51,9 +51,9 @@
     "watch": "tsc --watch",
     "prepublishOnly": "bun run build",
     "check:wiring": "node scripts/check-capacitor-plugin-wiring.mjs",
-    "prepare:certs": "bun run scripts/prepare-certs.mjs",
-    "capacitor:sync:before": "bun run prepare:certs",
-    "capacitor:update:before": "bun run prepare:certs"
+    "prepare:certs": "node scripts/prepare-certs.mjs",
+    "capacitor:sync:before": "node scripts/patch-native-bridge.mjs && npm run prepare:certs",
+    "capacitor:update:before": "node scripts/patch-native-bridge.mjs && npm run prepare:certs"
   },
   "devDependencies": {
     "@capacitor/android": "^8.0.0",

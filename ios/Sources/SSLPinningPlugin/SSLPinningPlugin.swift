@@ -21,7 +21,7 @@ public class SSLPinningPlugin: CAPPlugin, CAPBridgedPlugin {
         ])
     }
 
-    @objc override public func handleWKWebViewURLAuthenticationChallenge(
+    @objc public func handleWKWebViewURLAuthenticationChallenge(
         _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) -> Bool {

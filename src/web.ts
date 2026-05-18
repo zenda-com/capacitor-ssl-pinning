@@ -7,6 +7,7 @@ export class SSLPinningWeb extends WebPlugin implements SSLPinningPlugin {
     return {
       configured: false,
       certs: [],
+      pins: [],
       excludedDomains: [],
     };
   }

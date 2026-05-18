@@ -1,29 +1,33 @@
 import Capacitor
+import CommonCrypto
 import Foundation
 import Security
 
 struct SSLPinningConfiguration {
     let certs: [String]
+    let pins: [String]
     let excludedDomains: [String]
 
-    static let empty = SSLPinningConfiguration(certs: [], excludedDomains: [])
+    static let empty = SSLPinningConfiguration(certs: [], pins: [], excludedDomains: [])
 
     var configured: Bool {
-        !certs.isEmpty
+        !certs.isEmpty || !pins.isEmpty
     }
 
     var asJSObject: [String: Any] {
         [
             "configured": configured,
             "certs": certs,
+            "pins": pins,
             "excludedDomains": excludedDomains
         ]
     }
 
     static func from(_ pluginConfig: PluginConfig) -> SSLPinningConfiguration {
         let certs = (pluginConfig.getArray("certs") as? [String]) ?? []
+        let pins = (pluginConfig.getArray("pins") as? [String]) ?? []
         let excludedDomains = (pluginConfig.getArray("excludedDomains") as? [String]) ?? []
-        return SSLPinningConfiguration(certs: certs, excludedDomains: excludedDomains)
+        return SSLPinningConfiguration(certs: certs, pins: pins, excludedDomains: excludedDomains)
     }
 }
 
@@ -116,20 +120,180 @@ enum SSLPinningTrustEvaluator {
             return (.performDefaultHandling, nil)
         }
 
+        if configuration.certs.isEmpty && configuration.pins.isEmpty {
+            return (.performDefaultHandling, nil)
+        }
+
+        if configuration.certs.isEmpty && !configuration.pins.isEmpty {
+            guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  let leafCertificate = certificateChain.first,
+                  verifySha256Pins(certificate: leafCertificate, pins: configuration.pins)
+            else {
+                return (.cancelAuthenticationChallenge, nil)
+            }
+            return (.useCredential, URLCredential(trust: trust))
+        }
+
+        if configuration.pins.isEmpty && !configuration.certs.isEmpty {
+            do {
+                let certificates = try SSLPinningCertificateStore.shared.certificates(for: configuration.certs)
+                SecTrustSetAnchorCertificates(trust, certificates as CFArray)
+                SecTrustSetAnchorCertificatesOnly(trust, true)
+
+                var evaluationError: CFError?
+                guard SecTrustEvaluateWithError(trust, &evaluationError) else {
+                    return (.cancelAuthenticationChallenge, nil)
+                }
+                return (.useCredential, URLCredential(trust: trust))
+            } catch {
+                return (.cancelAuthenticationChallenge, nil)
+            }
+        }
+
         do {
             let certificates = try SSLPinningCertificateStore.shared.certificates(for: configuration.certs)
             SecTrustSetAnchorCertificates(trust, certificates as CFArray)
             SecTrustSetAnchorCertificatesOnly(trust, true)
 
             var evaluationError: CFError?
-            if SecTrustEvaluateWithError(trust, &evaluationError) {
-                return (.useCredential, URLCredential(trust: trust))
+            guard SecTrustEvaluateWithError(trust, &evaluationError) else {
+                return (.cancelAuthenticationChallenge, nil)
             }
 
-            return (.cancelAuthenticationChallenge, nil)
+            guard let certificateChain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+                  let leafCertificate = certificateChain.first,
+                  verifySha256Pins(certificate: leafCertificate, pins: configuration.pins)
+            else {
+                return (.cancelAuthenticationChallenge, nil)
+            }
+
+            return (.useCredential, URLCredential(trust: trust))
         } catch {
             return (.cancelAuthenticationChallenge, nil)
         }
+    }
+
+    private static func verifySha256Pins(certificate: SecCertificate, pins: [String]) -> Bool {
+        guard let spkiHash = publicKeySpkiSha256(certificate: certificate) else {
+            return false
+        }
+
+        let computedHash = spkiHash.base64EncodedString()
+
+        for pin in pins {
+            let expectedHash: String
+            if pin.hasPrefix("sha256/") {
+                expectedHash = String(pin.dropFirst(7))
+            } else {
+                expectedHash = pin
+            }
+
+            if computedHash == expectedHash {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func publicKeySpkiSha256(certificate: SecCertificate) -> Data? {
+        guard let publicKey = SecCertificateCopyKey(certificate) else { return nil }
+
+        var error: Unmanaged<CFError>?
+        guard let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+            return nil
+        }
+
+        let keyType = (SecKeyCopyAttributes(publicKey) as? [String: Any])?[kSecAttrKeyType as String] as? String
+
+        var spki: Data
+        if keyType == kSecAttrKeyTypeRSA as String {
+            spki = buildRsaSpki(publicKeyData: publicKeyData)
+        } else {
+            spki = buildEcSpki(publicKeyData: publicKeyData, publicKey: publicKey)
+        }
+
+        return sha256(spki)
+    }
+
+    private static func buildRsaSpki(publicKeyData: Data) -> Data {
+        let algorithmIdentifier: [UInt8] = [
+            0x30, 0x0d,
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+            0x05, 0x00
+        ]
+
+        var bitStringPayload = Data()
+        bitStringPayload.append(0x00 as UInt8)
+        bitStringPayload.append(publicKeyData)
+
+        let bitString = asn1Tag(0x03, payload: bitStringPayload)
+
+        var spkiPayload = Data(algorithmIdentifier)
+        spkiPayload.append(bitString)
+
+        return asn1Tag(0x30, payload: spkiPayload)
+    }
+
+    private static func buildEcSpki(publicKeyData: Data, publicKey: SecKey) -> Data {
+        guard let attributes = SecKeyCopyAttributes(publicKey) as? [String: Any],
+              let keySize = attributes[kSecAttrKeySizeInBits as String] as? Int else {
+            return Data()
+        }
+
+        let curveOid: [UInt8]
+        switch keySize {
+        case 256:
+            curveOid = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]
+        case 384:
+            curveOid = [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]
+        default:
+            curveOid = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]
+        }
+
+        let algorithmIdentifier: [UInt8] = [
+            0x30, 0x0a + UInt8(curveOid.count - 2),
+            0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01
+        ] + curveOid
+
+        var bitStringPayload = Data()
+        bitStringPayload.append(0x00 as UInt8)
+        bitStringPayload.append(publicKeyData)
+
+        let bitString = asn1Tag(0x03, payload: bitStringPayload)
+
+        var spkiPayload = Data(algorithmIdentifier)
+        spkiPayload.append(bitString)
+
+        return asn1Tag(0x30, payload: spkiPayload)
+    }
+
+    private static func asn1Tag(_ tag: UInt8, payload: Data) -> Data {
+        var result = Data([tag])
+        result.append(contentsOf: derLength(payload.count))
+        result.append(payload)
+        return result
+    }
+
+    private static func derLength(_ length: Int) -> [UInt8] {
+        if length < 128 {
+            return [UInt8(length)]
+        }
+        var bytes = [UInt8]()
+        var value = length
+        while value > 0 {
+            bytes.insert(UInt8(value & 0xff), at: 0)
+            value >>= 8
+        }
+        return [UInt8(0x80 | bytes.count)] + bytes
+    }
+
+    private static func sha256(_ data: Data) -> Data {
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { buffer in
+            _ = CC_SHA256(buffer.baseAddress, CC_LONG(buffer.count), &hash)
+        }
+        return Data(hash)
     }
 
     private static func url(from protectionSpace: URLProtectionSpace) -> URL? {

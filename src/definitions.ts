@@ -23,6 +23,11 @@ export interface SSLPinningConfigurationState {
   certs: string[];
 
   /**
+   * SHA-256 public key pins in `sha256/<base64>` format.
+   */
+  pins: string[];
+
+  /**
    * Fully-qualified URLs that should bypass SSL pinning.
    */
   excludedDomains: string[];
@@ -39,6 +44,15 @@ export interface SSLPinningPluginConfig {
    * the bundled web assets.
    */
   certs?: string[];
+
+  /**
+   * SHA-256 public key pins in `sha256/<base64>` format.
+   *
+   * When configured, the plugin extracts the public key from the server's leaf certificate,
+   * computes its SHA-256 hash, and compares it against these pins. Supports key rotation by
+   * specifying multiple pins — at least one must match.
+   */
+  pins?: string[];
 
   /**
    * Fully-qualified URLs that should bypass pinning.

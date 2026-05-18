@@ -10,6 +10,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.net.URL;
 import java.util.Arrays;
 import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.X509TrustManager;
 
 @CapacitorPlugin(name = "SSLPinning")
 public class SSLPinning extends Plugin {
@@ -24,9 +25,11 @@ public class SSLPinning extends Plugin {
         final Bridge bridge = getBridge();
         final JSObject result = new JSObject();
         final String[] certs = CertificateLoader.getConfiguredCertPaths(bridge);
+        final String[] pins = CertificateLoader.getPins(bridge);
         final String[] excludedDomains = CertificateLoader.getExcludedDomains(bridge);
-        result.put("configured", certs.length > 0);
+        result.put("configured", certs.length > 0 || pins.length > 0);
         result.put("certs", certs);
+        result.put("pins", pins);
         result.put("excludedDomains", excludedDomains);
         call.resolve(result);
     }
@@ -44,7 +47,8 @@ public class SSLPinning extends Plugin {
 
     public SSLSocketFactory getSSLSocketFactory(final Bridge bridge) {
         final String[] certPaths = CertificateLoader.getConfiguredCertPaths(bridge);
-        if (certPaths.length == 0) {
+        final String[] pins = CertificateLoader.getPins(bridge);
+        if (certPaths.length == 0 && pins.length == 0) {
             return null;
         }
 
@@ -54,7 +58,7 @@ public class SSLPinning extends Plugin {
             }
 
             try {
-                cachedSocketFactory = CertificateLoader.createSocketFactory(bridge.getContext(), certPaths);
+                cachedSocketFactory = CertificateLoader.createSocketFactory(bridge.getContext(), certPaths, pins);
                 cachedCertPaths = Arrays.copyOf(certPaths, certPaths.length);
                 return cachedSocketFactory;
             } catch (Exception exception) {
